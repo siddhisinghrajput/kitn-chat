@@ -1,897 +1,1234 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { io, Socket } from 'socket.io-client';
 import { 
-  Ghost, 
-  Play, 
-  Send, 
-  Check, 
-  Bell, 
-  Search, 
-  Headphones, 
-  MoreHorizontal, 
-  Sparkles,
-  ArrowLeft,
-  AlertTriangle,
-  ShieldAlert,
-  UserCheck
+  Send, Search, Plus, User, LogOut, Sparkles, MessageSquare, PlusCircle, AlertCircle, RefreshCw, Users, ShieldAlert, Ghost, Smile, X, ArrowLeft
 } from 'lucide-react';
+
+// Dynamic API URL Helper
+const getApiUrl = () => {
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL;
+  }
+  const origin = window.location.origin;
+  if (origin.includes('localhost:5173') || origin.includes('127.0.0.1:5173')) {
+    return 'http://localhost:3000';
+  }
+  return origin;
+};
+
+const API_URL = getApiUrl();
+
+interface UserProfile {
+  id: number;
+  username: string;
+  email: string;
+  avatarUrl: string | null;
+  moodEmoji: string | null;
+  moodText: string | null;
+  isAnonymousMode: boolean;
+  anonymousAlias: string | null;
+}
+
+interface ChatRoom {
+  id: number;
+  name: string | null;
+  type: 'group' | 'dm';
+  isPublic: boolean;
+  createdBy: number;
+  members: {
+    role: 'admin' | 'member';
+    user: UserProfile;
+  }[];
+}
 
 interface ChatMessage {
   id: string;
+  roomId: number;
+  content: string;
+  type: 'text' | 'voice' | 'poll_ref';
+  isAnonymous: boolean;
+  createdAt: string;
   sender: {
-    id: string | null;
+    id: number | null;
     username: string;
     avatarUrl: string | null;
     isAnonymousMode: boolean;
-    anonymousAlias?: string;
-  };
-  content: string;
-  type: 'text' | 'voice' | 'poll_ref';
-  voiceUrl?: string;
-  voiceDurationSeconds?: number;
-  isAnonymous?: boolean;
-  createdAt: Date;
-  tone?: string;
-  toneSeverity?: 'warning' | 'alert' | 'good';
-  poll?: {
-    id: number;
-    question: string;
-    options: { id: number; text: string; votes: number }[];
+    anonymousAlias: string | null;
   };
 }
 
 export default function App() {
-  // Navigation states
-  const [currentView, setCurrentView] = useState<'chats' | 'chat-thread' | 'moods' | 'schedule'>('chats');
-  const [activeChat, setActiveChat] = useState<{ name: string; avatar: string; subtitle?: string; type: 'dm' | 'group' } | null>(null);
+  // Auth states
+  const [token, setToken] = useState<string | null>(localStorage.getItem('kith_token'));
+  const [user, setUser] = useState<UserProfile | null>(null);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  
+  // Auth Form Input
+  const [emailInput, setEmailInput] = useState('');
+  const [passwordInput, setPasswordInput] = useState('');
+  const [usernameInput, setUsernameInput] = useState('');
+  const [authError, setAuthError] = useState<string | null>(null);
 
-  // App settings & mood states
-  const [selectedMood, setSelectedMood] = useState('Deep Flow');
-  const [ghostMode, setGhostMode] = useState(true);
-  const [disappearingHours, setDisappearingHours] = useState(1);
-  const [customVibeText, setCustomVibeText] = useState("listening to 'Low-fi Morning'");
+  // App Dashboard states
+  const [rooms, setRooms] = useState<ChatRoom[]>([]);
+  const [activeRoom, setActiveRoom] = useState<ChatRoom | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [contacts, setContacts] = useState<UserProfile[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  
+  // Modals & Panel Toggles
+  const [newChatModalOpen, setNewChatModalOpen] = useState(false);
+  const [newGroupModalOpen, setNewGroupModalOpen] = useState(false);
+  const [moodModalOpen, setMoodModalOpen] = useState(false);
+  const [summaryOpen, setSummaryOpen] = useState(false);
 
-  // User input states
-  const [textInput, setTextInput] = useState('');
-  const [isAnonSend, setIsAnonSend] = useState(false);
-  const [detectedTone, setDetectedTone] = useState<{ text: string; severity: 'warning' | 'alert' | 'good' } | null>(null);
+  // Input states
+  const [messageInput, setMessageInput] = useState('');
+  const [sendAnonymously, setSendAnonymously] = useState(false);
+  
+  // Group creation selections
+  const [groupName, setGroupName] = useState('');
+  const [selectedMemberIds, setSelectedMemberIds] = useState<number[]>([]);
 
-  // Active voice player state
-  const [isPlayingVoice, setIsPlayingVoice] = useState(false);
-  const [voiceProgress, setVoiceProgress] = useState(0);
+  // Mood update inputs
+  const [selectedEmoji, setSelectedEmoji] = useState('😊');
+  const [customVibeText, setCustomVibeText] = useState('');
 
-  // Database / state stores
-  const [messages, setMessages] = useState<Record<string, ChatMessage[]>>({
-    'Sarah Miller': [
-      {
-        id: 'msg-1',
-        sender: { id: 'sarah', username: 'Sarah Miller', avatarUrl: '👩🏼', isAnonymousMode: false },
-        content: 'I think we should lean into the tactile paper feel. It feels more human than just another glass UI.',
-        type: 'text',
-        createdAt: new Date(Date.now() - 1000 * 60 * 5)
-      },
-      {
-        id: 'msg-2',
-        sender: { id: 'me', username: 'You', avatarUrl: 'ME', isAnonymousMode: false },
-        content: "Agreed. I'm adding a slight texture to the clay surfaces now.",
-        type: 'text',
-        createdAt: new Date(Date.now() - 1000 * 60 * 4),
-        tone: 'Confident & Warm',
-        toneSeverity: 'good'
-      },
-      {
-        id: 'msg-3',
-        sender: { id: 'sarah', username: 'Sarah Miller', avatarUrl: '👩🏼', isAnonymousMode: false },
-        content: '[Voice Note: 12s]',
-        type: 'voice',
-        voiceDurationSeconds: 12,
-        createdAt: new Date(Date.now() - 1000 * 60 * 2)
-      }
-    ],
-    'Design Collective': [
-      {
-        id: 'msg-dc-1',
-        sender: { id: 'marcus', username: 'Marcus', avatarUrl: '🧔🏻', isAnonymousMode: false },
-        content: "Let's try the clay palette for our buttons.",
-        type: 'text',
-        createdAt: new Date(Date.now() - 1000 * 60 * 30)
-      },
-      {
-        id: 'msg-dc-2',
-        sender: { id: 'system', username: 'Kith Bot', avatarUrl: '🤖', isAnonymousMode: false },
-        content: '📊 Poll: Which button radius should we lock in?',
-        type: 'poll_ref',
-        createdAt: new Date(Date.now() - 1000 * 60 * 20),
-        poll: {
-          id: 101,
-          question: 'Which button radius should we lock in?',
-          options: [
-            { id: 1, text: '8px (Compact)', votes: 2 },
-            { id: 2, text: '12px (Kith Theme)', votes: 6 },
-            { id: 3, text: '16px (Puffy)', votes: 1 }
-          ]
-        }
-      }
-    ],
-    'Garden Club': [
-      {
-        id: 'msg-gc-1',
-        sender: { id: 'system', username: 'Garden Bot', avatarUrl: '🌱', isAnonymousMode: false },
-        content: '📊 Poll: Which seeds for Spring planting?',
-        type: 'poll_ref',
-        createdAt: new Date(Date.now() - 1000 * 60 * 120),
-        poll: {
-          id: 102,
-          question: 'Which seeds for Spring planting?',
-          options: [
-            { id: 10, text: 'Lavender 🌱', votes: 5 },
-            { id: 11, text: 'Sunflower 🌻', votes: 12 },
-            { id: 12, text: 'Rosemary 🌿', votes: 3 }
-          ]
-        }
-      }
-    ]
-  });
+  // AI & Typing States
+  const [toneResult, setToneResult] = useState<{ tone: string; severity: 'warning' | 'alert' | 'good'; explanation?: string } | null>(null);
+  const [smartReplies, setSmartReplies] = useState<string[]>([]);
+  const [typingUsers, setTypingUsers] = useState<{ userId: number; username: string }[]>([]);
+  const [aiSummary, setAiSummary] = useState<string | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
 
-  // Scheduled tasks/reminders state
-  const [reminders, setReminders] = useState([
-    { id: 1, title: 'Review parchment mocks', from: 'Sarah Miller', time: 'Today · 3:00 PM', completed: false, isAiDetected: true },
-    { id: 2, title: 'Send seed list for spring', from: 'Garden Club', time: 'Tomorrow · 9:00 AM', completed: false, isAiDetected: false },
-    { id: 3, title: 'Pay Marcus for coffee run', from: 'Design Collective', time: 'Fri · 6:00 PM', completed: true, isAiDetected: false }
-  ]);
-
-  // Scroll anchor for messages
+  // Ref handles
+  const socketRef = useRef<Socket | null>(null);
   const messageEndRef = useRef<HTMLDivElement>(null);
+  const typingTimeoutRef = useRef<any>(null);
 
-  // Auto-scroll messages view on update
+  // 1. Fetch Current Profile if Token Exists
   useEffect(() => {
-    if (currentView === 'chat-thread') {
-      messageEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (token) {
+      fetch(`${API_URL}/api/users/me`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      .then(async (res) => {
+        if (res.ok) {
+          const profile = await res.json();
+          setUser(profile);
+        } else {
+          handleLogout();
+        }
+      })
+      .catch(() => handleLogout());
+    } else {
+      setUser(null);
     }
-  }, [messages, currentView]);
+  }, [token]);
 
-  // Local rule-based Tone checking simulator (Wow factor)
+  // 2. Fetch Dashboard Data (Rooms & Contacts)
+  const fetchDashboardData = async () => {
+    if (!token) return;
+    try {
+      // Fetch Rooms
+      const roomsRes = await fetch(`${API_URL}/api/rooms`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (roomsRes.ok) {
+        const roomsData = await roomsRes.json();
+        setRooms(roomsData);
+      }
+      
+      // Fetch Contacts
+      const contactsRes = await fetch(`${API_URL}/api/users`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (contactsRes.ok) {
+        const contactsData = await contactsRes.json();
+        setContacts(contactsData);
+      }
+    } catch (err) {
+      console.error('Error loading dashboard data:', err);
+    }
+  };
+
   useEffect(() => {
-    if (!textInput.trim()) {
-      setDetectedTone(null);
+    if (token && user) {
+      fetchDashboardData();
+    }
+  }, [token, user]);
+
+  // 3. Socket.IO Connection & Setup
+  useEffect(() => {
+    if (!token || !user) {
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
+      }
       return;
     }
 
-    const lowerInput = textInput.toLowerCase();
-    
-    // Simple tone rules simulating our Claude AI checks
-    if (lowerInput.includes('hurry') || lowerInput.includes('now!') || lowerInput.includes('immediately') || lowerInput.includes('do this')) {
-      setDetectedTone({ text: 'Tone: Demanding / Harsh', severity: 'alert' });
-    } else if (lowerInput.includes('whatever') || lowerInput.includes('stupid') || lowerInput.includes('nonsense') || lowerInput.includes('worst')) {
-      setDetectedTone({ text: 'Tone: Aggressive / Passive-Aggressive', severity: 'warning' });
-    } else if (lowerInput.includes('please') || lowerInput.includes('thanks') || lowerInput.includes('great') || lowerInput.includes('love') || lowerInput.includes('perfect')) {
-      setDetectedTone({ text: 'Tone: Polite & Positive', severity: 'good' });
-    } else {
-      setDetectedTone({ text: 'Tone: Neutral', severity: 'good' });
-    }
-  }, [textInput]);
+    // Connect to WebSocket Server
+    const socket = io(API_URL, {
+      auth: { token }
+    });
+    socketRef.current = socket;
 
-  // Simulates playing a voice note
-  useEffect(() => {
-    let interval: any;
-    if (isPlayingVoice) {
-      interval = setInterval(() => {
-        setVoiceProgress(prev => {
-          if (prev >= 100) {
-            setIsPlayingVoice(false);
-            return 0;
+    socket.on('connect', () => {
+      console.log('🔌 Socket connected successfully');
+      // Rejoin rooms on connect
+      rooms.forEach((r) => socket.emit('join_room', { roomId: r.id }));
+    });
+
+    // Handle Incoming Messages
+    socket.on('new_message', (msg: ChatMessage) => {
+      setMessages((prev) => {
+        // Avoid duplicate rendering
+        if (prev.some((m) => m.id === msg.id)) return prev;
+        if (msg.roomId === activeRoom?.id) {
+          return [...prev, msg];
+        }
+        return prev;
+      });
+
+      // Update last message in the room list locally
+      setRooms((prevRooms) => {
+        return prevRooms.map((room) => {
+          if (room.id === msg.roomId) {
+            // We store the message content for preview
+            return {
+              ...room,
+              lastMessage: msg
+            } as any;
           }
-          return prev + 8;
+          return room;
         });
-      }, 500);
-    } else {
-      clearInterval(interval);
-    }
-    return () => clearInterval(interval);
-  }, [isPlayingVoice]);
+      });
+    });
 
-  // Opens a DM or group chat
-  const handleOpenChat = (chatName: string, avatar: string, subtitle?: string, type: 'dm' | 'group' = 'dm') => {
-    setActiveChat({ name: chatName, avatar, subtitle, type });
-    setCurrentView('chat-thread');
-  };
+    // Handle Typing Indicators
+    socket.on('typing_indicator', (data: { userId: number; username: string; roomId: number; isTyping: boolean }) => {
+      if (data.roomId !== activeRoom?.id) return;
+      
+      setTypingUsers((prev) => {
+        if (data.isTyping) {
+          if (prev.some((u) => u.userId === data.userId)) return prev;
+          return [...prev, { userId: data.userId, username: data.username }];
+        } else {
+          return prev.filter((u) => u.userId !== data.userId);
+        }
+      });
+    });
 
-  // Casts a vote in a poll
-  const handleVote = (pollId: number, optionId: number) => {
-    if (!activeChat) return;
-    const roomMessages = messages[activeChat.name] || [];
-    const updated = roomMessages.map(m => {
-      if (m.type === 'poll_ref' && m.poll?.id === pollId) {
-        return {
-          ...m,
-          poll: {
-            ...m.poll,
-            options: m.poll.options.map(o => {
-              if (o.id === optionId) {
-                return { ...o, votes: o.votes + 1 };
+    // Handle Mood Updates Live
+    socket.on('mood_updated', (data: { userId: number; moodEmoji: string | null; moodText: string | null }) => {
+      // Update room member list moods live
+      setRooms((prevRooms) => {
+        return prevRooms.map((room) => {
+          const updatedMembers = room.members.map((m) => {
+            if (m.user.id === data.userId) {
+              return {
+                ...m,
+                user: {
+                  ...m.user,
+                  moodEmoji: data.moodEmoji,
+                  moodText: data.moodText
+                }
+              };
+            }
+            return m;
+          });
+          return { ...room, members: updatedMembers };
+        });
+      });
+
+      if (activeRoom) {
+        const updatedMembers = activeRoom.members.map((m) => {
+          if (m.user.id === data.userId) {
+            return {
+              ...m,
+              user: {
+                ...m.user,
+                moodEmoji: data.moodEmoji,
+                moodText: data.moodText
               }
-              return o;
-            })
+            };
           }
-        };
+          return m;
+        });
+        setActiveRoom({ ...activeRoom, members: updatedMembers });
       }
-      return m;
     });
 
-    setMessages({
-      ...messages,
-      [activeChat.name]: updated
+    // Handle AI Summaries
+    socket.on('ai_summary_ready', (data: { roomId: number; summary: string }) => {
+      if (data.roomId === activeRoom?.id) {
+        setAiSummary(data.summary);
+        setSummaryLoading(false);
+      }
     });
-  };
 
-  // Sends a message
-  const handleSendMessage = (contentStr?: string) => {
-    const textToSend = contentStr || textInput;
-    if (!textToSend.trim() || !activeChat) return;
+    // Handle AI Smart Replies
+    socket.on('smart_replies_ready', (data: { messageId: string; suggestions: string[] }) => {
+      // Only set smart replies if they relate to the last message in active room
+      setSmartReplies(data.suggestions);
+    });
 
-    const newMsg: ChatMessage = {
-      id: `msg-${Date.now()}`,
-      sender: isAnonSend 
-        ? { id: null, username: 'Shadow42', avatarUrl: '👻', isAnonymousMode: true, anonymousAlias: 'Shadow42' }
-        : { id: 'me', username: 'You', avatarUrl: 'ME', isAnonymousMode: false },
-      content: textToSend,
-      type: 'text',
-      createdAt: new Date(),
-      isAnonymous: isAnonSend,
-      tone: detectedTone ? detectedTone.text.replace('Tone: ', '') : undefined,
-      toneSeverity: detectedTone?.severity
+    // Join all rooms
+    rooms.forEach((r) => {
+      socket.emit('join_room', { roomId: r.id });
+    });
+
+    return () => {
+      socket.disconnect();
+      socketRef.current = null;
     };
+  }, [token, user, rooms, activeRoom]);
 
-    const currentChatName = activeChat.name;
+  // 4. Fetch Message History when room changes
+  useEffect(() => {
+    if (!token || !activeRoom) {
+      setMessages([]);
+      setSmartReplies([]);
+      setAiSummary(null);
+      return;
+    }
 
-    // Append user message
-    setMessages(prev => ({
-      ...prev,
-      [currentChatName]: [...(prev[currentChatName] || []), newMsg]
-    }));
+    // Load message history from DB
+    fetch(`${API_URL}/api/rooms/${activeRoom.id}/messages`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+    .then(async (res) => {
+      if (res.ok) {
+        const result = await res.json();
+        // Backend returns Paginated result: { data: ChatMessage[], nextCursor: string | null }
+        setMessages(result.data.reverse());
+      }
+    })
+    .catch((err) => console.error('Error fetching messages:', err));
 
-    setTextInput('');
+    // Clear typing states
+    setTypingUsers([]);
+    setSmartReplies([]);
+    setAiSummary(null);
+
+    // Join socket room explicitly
+    if (socketRef.current) {
+      socketRef.current.emit('join_room', { roomId: activeRoom.id });
+    }
+  }, [activeRoom, token]);
+
+  // 5. Scroll chat to bottom on new messages
+  useEffect(() => {
+    messageEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, typingUsers]);
+
+  // 6. Debounced Real-Time AI Tone Checker
+  useEffect(() => {
+    if (!messageInput.trim() || !token) {
+      setToneResult(null);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/ai/tone-check`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({ content: messageInput })
+        });
+        if (res.ok) {
+          const result = await res.json();
+          setToneResult(result);
+        }
+      } catch (err) {
+        console.error('Error checking tone:', err);
+      }
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [messageInput, token]);
+
+  // 7. Handles user typing broadcast
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setMessageInput(e.target.value);
+
+    if (socketRef.current && activeRoom) {
+      // Start typing broadcast
+      socketRef.current.emit('typing_start', { roomId: activeRoom.id });
+
+      // Debounce typing stop
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = setTimeout(() => {
+        socketRef.current?.emit('typing_stop', { roomId: activeRoom.id });
+      }, 2000);
+    }
+  };
+
+  // 8. Auth Operations
+  const handleAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError(null);
+
+    const endpoint = authMode === 'login' ? '/api/auth/login' : '/api/auth/register';
+    const body = authMode === 'login' 
+      ? { email: emailInput, password: passwordInput }
+      : { username: usernameInput, email: emailInput, password: passwordInput };
+
+    try {
+      const res = await fetch(`${API_URL}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Authentication failed');
+      }
+
+      // Success: Save token & setup state
+      if (authMode === 'login') {
+        localStorage.setItem('kith_token', data.accessToken);
+        setToken(data.accessToken);
+      } else {
+        // After register, automatically switch to login page
+        setAuthMode('login');
+        setAuthError('Registration successful! Please log in.');
+      }
+    } catch (err: any) {
+      setAuthError(err.message);
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('kith_token');
+    setToken(null);
+    setUser(null);
+    setActiveRoom(null);
+    setRooms([]);
+    setMessages([]);
+  };
+
+  // 9. Send Message Action
+  const handleSendMessage = (content: string) => {
+    if (!content.trim() || !socketRef.current || !activeRoom) return;
+
+    // Send via WebSockets
+    socketRef.current.emit('send_message', {
+      roomId: activeRoom.id,
+      content,
+      type: 'text',
+      isAnonymous: sendAnonymously,
+      expiresIn: null // Disappearing message support
+    });
+
+    setMessageInput('');
+    setSendAnonymously(false);
+    setToneResult(null);
+    setSmartReplies([]);
     
-    // Simulate smart AI response after 1.5 seconds to make it a fully alive "app"
-    setTimeout(() => {
-      const replyMsg: ChatMessage = {
-        id: `msg-reply-${Date.now()}`,
-        sender: { id: 'system', username: activeChat.name === 'Design Collective' ? 'Marcus' : 'Sarah Miller', avatarUrl: activeChat.name === 'Design Collective' ? '🧔🏻' : '👩🏼', isAnonymousMode: false },
-        content: `Thanks for the input! That fits our design vibe perfectly. Let's run a test in the staging sandbox.`,
-        type: 'text',
-        createdAt: new Date()
+    // Stop typing indicator
+    socketRef.current.emit('typing_stop', { roomId: activeRoom.id });
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+  };
+
+  // 10. Start a DM with a Contact
+  const startDM = async (partner: UserProfile) => {
+    if (!token) return;
+    try {
+      const res = await fetch(`${API_URL}/api/rooms`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          type: 'dm',
+          memberIds: [partner.id]
+        })
+      });
+
+      if (res.ok) {
+        const room = await res.json();
+        // Re-fetch rooms to ensure list is in sync, then activate room
+        await fetchDashboardData();
+        setActiveRoom(room);
+        setNewChatModalOpen(false);
+      }
+    } catch (err) {
+      console.error('Error starting DM:', err);
+    }
+  };
+
+  // 11. Create a new Group Chat
+  const handleCreateGroup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token || !groupName.trim() || selectedMemberIds.length === 0) return;
+
+    try {
+      const res = await fetch(`${API_URL}/api/rooms`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          name: groupName,
+          type: 'group',
+          memberIds: selectedMemberIds
+        })
+      });
+
+      if (res.ok) {
+        const room = await res.json();
+        await fetchDashboardData();
+        setActiveRoom(room);
+        setGroupName('');
+        setSelectedMemberIds([]);
+        setNewGroupModalOpen(false);
+      }
+    } catch (err) {
+      console.error('Error creating group:', err);
+    }
+  };
+
+  // 12. Toggle Anonymous Mode on Profile
+  const toggleAnonymousMode = async () => {
+    if (!token || !user) return;
+    try {
+      const res = await fetch(`${API_URL}/api/users/me/anonymous`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        setUser({ ...user, isAnonymousMode: updated.isAnonymousMode, anonymousAlias: updated.anonymousAlias });
+      }
+    } catch (err) {
+      console.error('Error toggling anonymous mode:', err);
+    }
+  };
+
+  // 13. Update Mood Emoji/Text
+  const handleUpdateMood = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token || !user) return;
+    try {
+      const res = await fetch(`${API_URL}/api/users/me/mood`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          moodEmoji: selectedEmoji,
+          moodText: customVibeText
+        })
+      });
+
+      if (res.ok) {
+        setUser({ ...user, moodEmoji: selectedEmoji, moodText: customVibeText });
+        setMoodModalOpen(false);
+      }
+    } catch (err) {
+      console.error('Error updating mood:', err);
+    }
+  };
+
+  // 14. Request AI Chat Summary from Claude
+  const requestSummary = async () => {
+    if (!token || !activeRoom) return;
+    setSummaryLoading(true);
+    setSummaryOpen(true);
+    setAiSummary(null);
+
+    try {
+      await fetch(`${API_URL}/api/rooms/${activeRoom.id}/summarize`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({})
+      });
+      // The worker will build the summary and push it over Socket.io ('ai_summary_ready')
+    } catch (err) {
+      console.error('Error requesting summary:', err);
+      setSummaryLoading(false);
+    }
+  };
+
+  // Get display details for a room (handling DM partner name resolution)
+  const getRoomDisplayDetails = (room: ChatRoom) => {
+    if (room.type === 'group') {
+      return {
+        name: room.name || 'Group Chat',
+        avatar: '👥',
+        statusText: `${room.members.length} members`
       };
+    }
 
-      setMessages(prev => ({
-        ...prev,
-        [currentChatName]: [...(prev[currentChatName] || []), replyMsg]
-      }));
-    }, 1500);
+    // It's a DM, find the other member
+    const partnerMember = room.members.find((m) => m.user.id !== user?.id);
+    if (!partnerMember) {
+      return {
+        name: 'Saved Messages (You)',
+        avatar: '👤',
+        statusText: 'Personal Notes'
+      };
+    }
+
+    const partner = partnerMember.user;
+    const displayName = partner.isAnonymousMode 
+      ? partner.anonymousAlias || 'Anonymous Partner'
+      : partner.username;
+
+    const statusText = partner.moodEmoji 
+      ? `${partner.moodEmoji} ${partner.moodText || ''}` 
+      : 'Active Now';
+
+    return {
+      name: displayName,
+      avatar: partner.avatarUrl || '👤',
+      statusText: statusText
+    };
   };
 
-  // Toggle tasks completion status
-  const handleToggleReminder = (id: number) => {
-    setReminders(prev => prev.map(r => r.id === id ? { ...r, completed: !r.completed } : r));
-  };
+  // Render Login / Register screen if not authenticated
+  if (!token || !user) {
+    return (
+      <div className="h-screen w-screen bg-charcoal paper-texture flex items-center justify-center p-4">
+        <div className="w-full max-w-md bg-parchment rounded-2xl shadow-xl border border-clay/10 p-8 relative overflow-hidden">
+          <div className="absolute top-0 left-0 w-full h-1.5 bg-clay"></div>
+          
+          <div className="text-center mb-8">
+            <h1 className="font-serif text-4xl text-charcoal font-bold flex items-center justify-center gap-2">
+              <Sparkles className="text-clay w-7 h-7" /> Kith
+            </h1>
+            <p className="text-charcoal/60 mt-2 font-sans">
+              Humanist real-time chat with AI Tone and Summaries
+            </p>
+          </div>
+
+          <form onSubmit={handleAuthSubmit} className="space-y-4 font-sans">
+            {authError && (
+              <div className="p-3 bg-red-50 text-red-700 rounded-lg flex items-center gap-2 text-sm border border-red-200">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                <span>{authError}</span>
+              </div>
+            )}
+
+            {authMode === 'register' && (
+              <div>
+                <label className="block text-sm font-semibold text-charcoal/70 mb-1">Username</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Alexis"
+                  value={usernameInput}
+                  onChange={(e) => setUsernameInput(e.target.value)}
+                  className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-clay/50 bg-white text-charcoal"
+                />
+              </div>
+            )}
+
+            <div>
+              <label className="block text-sm font-semibold text-charcoal/70 mb-1">Email Address</label>
+              <input
+                type="email"
+                required
+                placeholder="you@example.com"
+                value={emailInput}
+                onChange={(e) => setEmailInput(e.target.value)}
+                className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-clay/50 bg-white text-charcoal"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-semibold text-charcoal/70 mb-1">Password</label>
+              <input
+                type="password"
+                required
+                placeholder="••••••••"
+                value={passwordInput}
+                onChange={(e) => setPasswordInput(e.target.value)}
+                className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-clay/50 bg-white text-charcoal"
+              />
+            </div>
+
+            <button
+              type="submit"
+              className="w-full py-2.5 bg-clay hover:bg-clay-hover text-white rounded-lg font-bold transition duration-200 flex items-center justify-center gap-2 mt-4 shadow-sm"
+            >
+              {authMode === 'login' ? 'Sign In' : 'Create Account'}
+            </button>
+          </form>
+
+          <div className="text-center mt-6 text-sm text-charcoal/60 font-sans">
+            {authMode === 'login' ? (
+              <span>
+                New to Kith?{' '}
+                <button onClick={() => { setAuthMode('register'); setAuthError(null); }} className="text-clay font-semibold hover:underline">
+                  Create an account
+                </button>
+              </span>
+            ) : (
+              <span>
+                Already have an account?{' '}
+                <button onClick={() => { setAuthMode('login'); setAuthError(null); }} className="text-clay font-semibold hover:underline">
+                  Sign in
+                </button>
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Filter rooms based on search query
+  const filteredRooms = rooms.filter((r) => {
+    const details = getRoomDisplayDetails(r);
+    return details.name.toLowerCase().includes(searchQuery.toLowerCase());
+  });
 
   return (
-    <div className="min-h-screen bg-[#ecebe5] p-2 md:p-6 lg:p-10 flex flex-col items-center justify-start paper-texture">
-      
-      {/* Title */}
-      <div className="text-center max-w-2xl mx-auto mb-6 space-y-1">
-        <span className="text-xs uppercase tracking-widest font-bold text-clay">
-          📱 LIVE CHAT PROTOTYPE
-        </span>
-        <h1 className="text-3xl md:text-4xl font-bold font-serif text-[#0f0f0f]">
-          Kith Interactive
-        </h1>
-        <p className="text-xs text-[#706c60] max-w-md mx-auto">
-          Click the screen list, toggle tabs, type, or configure moods. This is a fully functional client prototype container.
-        </p>
-      </div>
-
-      {/* Outer Phone Mockup Frame Container */}
-      <div className="relative w-full max-w-[375px] h-[780px] bg-charcoal border-[12px] border-charcoal rounded-[56px] shadow-2xl overflow-hidden flex flex-col ring-8 ring-neutral-800/40">
-        
-        {/* Notch / Speaker block */}
-        <div className="absolute top-0 left-1/2 transform -translate-x-1/2 w-36 h-6 bg-charcoal rounded-b-2xl z-30 flex items-center justify-center space-x-2">
-          <div className="w-2.5 h-2.5 rounded-full bg-neutral-900 border border-neutral-800"></div>
-          <div className="w-14 h-1 bg-neutral-950 rounded-full"></div>
-        </div>
-
-        {/* Home Screen Indicator bar at bottom */}
-        <div className="absolute bottom-1.5 left-1/2 transform -translate-x-1/2 w-32 h-1 bg-charcoal/40 rounded-full z-20"></div>
-
-        {/* View Switcher Main Panel */}
-        <div className="flex-1 bg-parchment flex flex-col overflow-hidden relative pt-6 pb-2.5">
-          
-          {/* ================= VIEW: CHATS (CHAT LIST) ================= */}
-          {currentView === 'chats' && (
-            <div className="flex flex-col h-full">
-              {/* Header */}
-              <div className="px-5 pt-3 pb-3 flex items-center justify-between border-b border-[#ebdcb9]/40 bg-parchment/80 backdrop-blur-sm">
-                <h2 className="text-3xl font-bold font-serif text-charcoal">Kith</h2>
-                <div className="relative">
-                  <div className="w-9 h-9 rounded-full bg-clay/10 border border-clay/30 flex items-center justify-center font-bold text-clay text-xs">
-                    ME
-                  </div>
-                  <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-green-500 border-2 border-parchment"></div>
-                </div>
-              </div>
-
-              {/* Vibe Status preview banner */}
-              <div className="px-4 py-2">
-                <div className="bg-[#faede2] border border-clay/15 rounded-xl px-3 py-2 flex items-center justify-between text-xs text-clay font-medium">
-                  <span className="truncate">Vibe: <strong>{selectedMood}</strong> · <em>{customVibeText}</em></span>
-                  <button onClick={() => setCurrentView('moods')} className="text-[10px] font-bold underline shrink-0 ml-1">Change</button>
-                </div>
-              </div>
-
-              {/* Search */}
-              <div className="px-4 py-1.5">
-                <div className="relative flex items-center bg-[#f2edd8]/45 border border-[#e0dcd3]/80 rounded-full px-3.5 py-1.5">
-                  <Search className="w-4 h-4 text-[#8a857b] mr-2" />
-                  <input 
-                    type="text" 
-                    placeholder="Search whispers..." 
-                    className="bg-transparent text-xs w-full focus:outline-none text-charcoal placeholder-[#a19c90]"
-                  />
-                </div>
-              </div>
-
-              {/* Chat log list */}
-              <div className="flex-1 overflow-y-auto px-4 space-y-3 pb-16 pt-1">
-                {/* AI Pulse Alert */}
-                <div className="bg-amber-tint border border-[#f5e4bd] p-3.5 rounded-2xl space-y-1.5 relative overflow-hidden">
-                  <div className="absolute right-3 top-3 w-2.5 h-2.5 rounded-full bg-clay animate-pulse"></div>
-                  <div className="flex items-center space-x-1.5">
-                    <Sparkles className="w-3.5 h-3.5 text-clay" />
-                    <span className="text-[10px] font-bold tracking-widest text-clay uppercase">AI PULSE</span>
-                  </div>
-                  <p className="text-[11px] text-[#524e45] leading-relaxed font-medium">
-                    Design Collective had a debate on button corners. Decision: <strong className="text-clay">12px radius wins</strong>.
-                  </p>
-                </div>
-
-                <div className="space-y-1">
-                  {/* Chat Item: Sarah Miller */}
-                  <div 
-                    onClick={() => handleOpenChat('Sarah Miller', '👩🏼', "listening to 'Low-fi Morning'", 'dm')}
-                    className="flex items-center p-3 rounded-2xl hover:bg-[#ebdcb9]/25 transition cursor-pointer active:bg-[#ebdcb9]/40"
-                  >
-                    <div className="relative mr-3 shrink-0">
-                      <div className="w-11 h-11 rounded-full bg-[#fae8d7] border border-clay/10 flex items-center justify-center text-lg">
-                        👩🏼
-                      </div>
-                      <div className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-clay flex items-center justify-center text-white border-2 border-parchment">
-                        <Headphones className="w-2.5 h-2.5" />
-                      </div>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex justify-between items-baseline mb-0.5">
-                        <h4 className="text-xs font-bold text-charcoal truncate">Sarah Miller</h4>
-                        <span className="text-[10px] text-[#9c9689] font-medium">2m ago</span>
-                      </div>
-                      <p className="text-xs text-[#706c60] truncate font-medium">
-                        {messages['Sarah Miller']?.[messages['Sarah Miller'].length - 1]?.content || 'Voice message note...'}
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Chat Item: Design Collective */}
-                  <div 
-                    onClick={() => handleOpenChat('Design Collective', '🧔🏻', 'Group Chat', 'group')}
-                    className="flex items-center p-3 rounded-2xl hover:bg-[#ebdcb9]/25 transition cursor-pointer active:bg-[#ebdcb9]/40"
-                  >
-                    <div className="w-11 h-11 rounded-full bg-charcoal flex items-center justify-center text-white text-xs font-bold mr-3 border border-charcoal shrink-0">
-                      PS
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex justify-between items-baseline mb-0.5">
-                        <h4 className="text-xs font-bold text-charcoal truncate">Design Collective</h4>
-                        <span className="text-[10px] text-[#9c9689] font-medium">14m ago</span>
-                      </div>
-                      <p className="text-xs text-clay truncate font-medium">
-                        {messages['Design Collective']?.[messages['Design Collective'].length - 1]?.content || 'Interactive poll inside...'}
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Chat Item: Garden Club */}
-                  <div 
-                    onClick={() => handleOpenChat('Garden Club', '🌱', 'Seeds Club', 'group')}
-                    className="flex items-center p-3 rounded-2xl hover:bg-[#ebdcb9]/25 transition cursor-pointer active:bg-[#ebdcb9]/40"
-                  >
-                    <div className="w-11 h-11 rounded-full bg-[#e8eed9] border border-[#d2dfb9] flex items-center justify-center text-lg mr-3 shrink-0">
-                      🌱
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex justify-between items-baseline mb-0.5">
-                        <h4 className="text-xs font-bold text-charcoal truncate">Garden Club</h4>
-                        <span className="text-[10px] text-[#9c9689] font-medium">1h ago</span>
-                      </div>
-                      <p className="text-xs text-[#706c60] truncate font-medium">
-                        Poll: which seeds for spring? 🌱
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Chat Item: Ghost User */}
-                  <div className="flex items-center p-3 rounded-2xl opacity-75 mr-3">
-                    <div className="w-11 h-11 rounded-full bg-purple-100 border border-purple-200 flex items-center justify-center text-lg mr-3 shrink-0">
-                      👻
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex justify-between items-baseline mb-0.5">
-                        <h4 className="text-xs font-bold text-purple-700 truncate">Ghost-User_42</h4>
-                        <span className="text-[10px] text-[#9c9689] font-medium">3h ago</span>
-                      </div>
-                      <p className="text-xs text-purple-600 italic truncate font-medium">
-                        Anonymous · disappearing in 23h
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ================= VIEW: CHAT THREAD ================= */}
-          {currentView === 'chat-thread' && activeChat && (
-            <div className="flex flex-col h-full bg-[#faf9f5]">
-              {/* Header */}
-              <div className="px-3 pt-3 pb-3 flex items-center justify-between border-b border-[#ebdcb9]/40 bg-parchment/90 backdrop-blur-sm shrink-0">
-                <div className="flex items-center space-x-2 min-w-0">
-                  <button onClick={() => setCurrentView('chats')} className="p-1 rounded-full hover:bg-neutral-200 transition">
-                    <ArrowLeft className="w-4 h-4 text-charcoal" />
-                  </button>
-                  <div className="w-8 h-8 rounded-full bg-[#fae8d7] border border-clay/10 flex items-center justify-center text-base shrink-0">
-                    {activeChat.avatar}
-                  </div>
-                  <div className="min-w-0">
-                    <h3 className="text-xs font-bold text-charcoal truncate">{activeChat.name}</h3>
-                    {activeChat.subtitle && (
-                      <p className="text-[9px] text-clay italic font-medium truncate">{activeChat.subtitle}</p>
-                    )}
-                  </div>
-                </div>
-                <MoreHorizontal className="w-4 h-4 text-[#8a857b] shrink-0" />
-              </div>
-
-              {/* Message Stream */}
-              <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                
-                {/* Catch Up Info Banner */}
-                {activeChat.name === 'Sarah Miller' && (
-                  <div className="bg-amber-tint border border-[#f5e4bd] p-3 rounded-xl space-y-1">
-                    <div className="flex items-center space-x-1">
-                      <Sparkles className="w-3 h-3 text-clay animate-pulse" />
-                      <span className="text-[9px] font-bold tracking-widest text-clay uppercase">CATCH-UP SUMMARY</span>
-                    </div>
-                    <p className="text-[10px] text-[#524e45] leading-normal font-medium">
-                      You missed 12 messages. Sarah finalized the parchment mockup; the collective aligned.
-                    </p>
-                  </div>
-                )}
-
-                {/* Rendered Messages */}
-                {(messages[activeChat.name] || []).map((msg) => {
-                  const isMe = msg.sender.id === 'me';
-                  
-                  if (msg.type === 'poll_ref' && msg.poll) {
-                    // Poll template render
-                    const totalVotes = msg.poll.options.reduce((sum, o) => sum + o.votes, 0);
-                    return (
-                      <div key={msg.id} className="bg-white border border-[#ebdcb9]/80 rounded-2xl p-4 space-y-3 shadow-sm max-w-[90%]">
-                        <div className="flex items-center space-x-2 mb-1">
-                          <span className="text-lg">📊</span>
-                          <h4 className="text-xs font-bold text-charcoal leading-snug">{msg.poll.question}</h4>
-                        </div>
-                        <div className="space-y-2">
-                          {msg.poll.options.map((opt) => {
-                            const pct = totalVotes > 0 ? Math.round((opt.votes / totalVotes) * 100) : 0;
-                            return (
-                              <button 
-                                key={opt.id}
-                                onClick={() => handleVote(msg.poll!.id, opt.id)}
-                                className="w-full text-left relative overflow-hidden rounded-xl border border-[#e2decb] p-2 hover:bg-[#faede2]/20 active:bg-[#faede2]/40 transition flex items-center justify-between text-xs"
-                              >
-                                {/* Animated percentage bar bg */}
-                                <div 
-                                  className="absolute left-0 top-0 bottom-0 bg-[#e07a3c]/10 transition-all duration-500 ease-out" 
-                                  style={{ width: `${pct}%` }}
-                                ></div>
-                                <span className="font-bold relative z-10 text-charcoal">{opt.text}</span>
-                                <span className="text-[10px] font-bold text-clay relative z-10">{opt.votes} ({pct}%)</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                        <p className="text-[9px] text-[#9c9689] font-bold text-right italic">Click option to test vote</p>
-                      </div>
-                    );
-                  }
-
-                  if (msg.type === 'voice') {
-                    // Voice Player template
-                    return (
-                      <div key={msg.id} className="flex flex-col space-y-0.5 max-w-[85%]">
-                        <div className="bg-white border border-[#ebdcb9]/60 rounded-2xl rounded-tl-none p-3 shadow-sm flex items-center space-x-3">
-                          <button 
-                            onClick={() => {
-                              setIsPlayingVoice(!isPlayingVoice);
-                              if(!isPlayingVoice) setVoiceProgress(0);
-                            }}
-                            className="w-7 h-7 rounded-full bg-clay flex items-center justify-center text-white shrink-0 hover:bg-clay-hover active:scale-95 transition"
-                          >
-                            {isPlayingVoice ? (
-                              <div className="flex items-center space-x-0.5">
-                                <div className="w-1 h-3 bg-white animate-pulse"></div>
-                                <div className="w-1 h-3 bg-white animate-pulse"></div>
-                              </div>
-                            ) : (
-                              <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
-                            )}
-                          </button>
-                          
-                          {/* Animated Waveform Progress bar */}
-                          <div className="flex-1 flex items-end space-x-1 h-6">
-                            {[12, 24, 8, 16, 22, 10, 18, 4, 15, 7].map((h, index) => {
-                              // color active bars based on mock voiceProgress percentage
-                              const activeBarIdx = Math.floor((voiceProgress / 100) * 10);
-                              const isActive = isPlayingVoice && index <= activeBarIdx;
-                              return (
-                                <div 
-                                  key={index} 
-                                  className="w-[3px] rounded-full transition-all duration-300"
-                                  style={{ 
-                                    height: `${h}px`, 
-                                    backgroundColor: isActive ? '#e07a3c' : '#ebdcb9' 
-                                  }}
-                                ></div>
-                              );
-                            })}
-                          </div>
-                          <span className="text-[9px] font-bold text-clay shrink-0">
-                            {isPlayingVoice ? `0:0${Math.floor((100 - voiceProgress)/10)}` : "0:12"}
-                          </span>
-                        </div>
-                        <span className="text-[9px] text-[#a19c90] ml-1">10:05 AM</span>
-                      </div>
-                    );
-                  }
-
-                  return (
-                    <div 
-                      key={msg.id}
-                      className={`flex flex-col space-y-0.5 max-w-[85%] ${isMe ? 'self-end items-end' : 'items-start'}`}
-                    >
-                      <div className={`p-3 rounded-2xl shadow-sm leading-relaxed ${
-                        isMe 
-                          ? 'bg-clay text-white rounded-tr-none' 
-                          : 'bg-white text-charcoal border border-[#ebdcb9]/60 rounded-tl-none'
-                      }`}>
-                        <div className="text-[10px] opacity-75 font-bold mb-0.5">
-                          {msg.sender.username}
-                        </div>
-                        <p className="text-xs font-medium">{msg.content}</p>
-                      </div>
-
-                      {/* Display Tone labels and timestamp */}
-                      <div className="flex items-center space-x-1.5 mt-0.5">
-                        {msg.tone && (
-                          <span className={`text-[8px] font-bold px-2 py-0.5 rounded-full border ${
-                            msg.toneSeverity === 'alert' 
-                              ? 'bg-red-50 text-red-600 border-red-200' 
-                              : msg.toneSeverity === 'warning'
-                              ? 'bg-amber-50 text-amber-600 border-amber-200'
-                              : 'bg-[#faede2] text-clay border-clay/10'
-                          }`}>
-                            Tone: {msg.tone}
-                          </span>
-                        )}
-                        <span className="text-[8px] text-[#a19c90]">
-                          {msg.createdAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })}
-
-                <div ref={messageEndRef} />
-              </div>
-
-              {/* Message Typing Panel */}
-              <div className="bg-parchment/95 backdrop-blur-sm border-t border-[#ebdcb9]/30 p-3 shrink-0 space-y-2">
-                
-                {/* Tone Alert Banner inside input */}
-                {detectedTone && (
-                  <div className={`flex items-center space-x-1.5 px-3 py-1 rounded-lg border text-[10px] font-bold transition-all ${
-                    detectedTone.severity === 'alert'
-                      ? 'bg-red-50 border-red-100 text-red-700'
-                      : detectedTone.severity === 'warning'
-                      ? 'bg-amber-50 border-amber-100 text-amber-700'
-                      : 'bg-green-50 border-green-100 text-green-700'
-                  }`}>
-                    {detectedTone.severity === 'alert' && <ShieldAlert className="w-3.5 h-3.5 text-red-600 animate-bounce" />}
-                    {detectedTone.severity === 'warning' && <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />}
-                    {detectedTone.severity === 'good' && <UserCheck className="w-3.5 h-3.5 text-green-600" />}
-                    <span>{detectedTone.text}</span>
-                  </div>
-                )}
-
-                {/* Smart Reply suggestion chips */}
-                <div className="flex space-x-1.5 overflow-x-auto pb-1">
-                  {["Ship it 🚀", "Let's check details", "Looks perfect", "Tell me more"].map((text, i) => (
-                    <button 
-                      key={i} 
-                      onClick={() => handleSendMessage(text)}
-                      className="bg-[#faede2] border border-clay/10 text-[9px] font-bold text-clay px-3 py-1 rounded-full whitespace-nowrap hover:bg-clay hover:text-white transition cursor-pointer"
-                    >
-                      {text}
-                    </button>
-                  ))}
-                </div>
-
-                {/* Text input, Anonymous toggle, Send btn */}
-                <div className="flex items-center space-x-2">
-                  {/* Anonymous sender toggle */}
-                  <button 
-                    onClick={() => setIsAnonSend(!isAnonSend)}
-                    className={`p-2 rounded-full border transition shrink-0 cursor-pointer ${
-                      isAnonSend 
-                        ? 'bg-purple-100 border-purple-300 text-purple-700' 
-                        : 'bg-white border-[#e2decb] text-[#8a857b] hover:bg-neutral-50'
-                    }`}
-                    title="Send anonymously as alias"
-                  >
-                    <Ghost className="w-4.5 h-4.5" />
-                  </button>
-
-                  <div className="flex-1 flex items-center bg-[#f2edd8]/45 border border-[#e0dcd3]/80 rounded-full p-1.5">
-                    <input 
-                      type="text" 
-                      value={textInput}
-                      onChange={(e) => setTextInput(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-                      placeholder={isAnonSend ? "Type a ghost whisper..." : "Type a whisper..."}
-                      className="bg-transparent text-xs w-full focus:outline-none pl-3 text-charcoal placeholder-[#a19c90]"
-                    />
-                    <button 
-                      onClick={() => handleSendMessage()}
-                      className="w-8 h-8 rounded-full bg-charcoal flex items-center justify-center text-white hover:bg-neutral-800 active:scale-90 transition shrink-0 cursor-pointer"
-                    >
-                      <Send className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ================= VIEW: MOODS ================= */}
-          {currentView === 'moods' && (
-            <div className="flex flex-col h-full pt-4 px-5 space-y-5 overflow-y-auto pb-16">
-              <div className="space-y-1">
-                <h3 className="text-2xl font-bold font-serif text-charcoal">Vibe Status</h3>
-                <p className="text-xs text-[#827e74] font-medium leading-relaxed">
-                  Your mood status and vibe text updates instantly in all chat lists.
-                </p>
-              </div>
-
-              {/* Mood Vibe input text */}
-              <div className="space-y-1 bg-white border border-[#ebdcb9]/60 p-3.5 rounded-2xl shadow-sm">
-                <label className="text-[9px] font-bold tracking-widest text-[#706c60] uppercase">VIBE STATUS TEXT</label>
-                <input 
-                  type="text"
-                  value={customVibeText}
-                  onChange={(e) => setCustomVibeText(e.target.value)}
-                  className="w-full bg-[#f2edd8]/20 border border-[#e0dcd3]/80 rounded-lg px-2.5 py-1.5 text-xs text-charcoal focus:outline-none font-medium"
-                />
-              </div>
-
-              {/* Mood Grid */}
-              <div className="grid grid-cols-2 gap-3">
-                {[
-                  { label: 'Focusing', status: 'AVAILABLE', emoji: '🧠' },
-                  { label: 'Deep Flow', status: 'SILENT', emoji: '🪐' },
-                  { label: 'At Cafe', status: 'VIBE', emoji: '☕' },
-                  { label: 'Traveling', status: 'MOBILE', emoji: '✈️' }
-                ].map((mood, idx) => {
-                  const isSelected = selectedMood === mood.label;
-                  return (
-                    <button
-                      key={idx}
-                      onClick={() => setSelectedMood(mood.label)}
-                      className={`p-4 rounded-2xl border flex flex-col items-center justify-center text-center space-y-1 transition cursor-pointer shadow-sm ${
-                        isSelected ? 'bg-clay border-clay text-parchment' : 'bg-white border-[#ebdcb9]/70 hover:bg-[#faede2]/20'
-                      }`}
-                    >
-                      <span className="text-2xl">{mood.emoji}</span>
-                      <span className="text-xs font-bold">{mood.label}</span>
-                      <span className={`text-[9px] font-bold tracking-widest ${
-                        isSelected ? 'text-orange-200' : 'text-[#9c9689]'
-                      }`}>
-                        {mood.status}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* Disappearing Messages Slider */}
-              <div className="bg-white border border-[#ebdcb9]/60 p-4 rounded-2xl space-y-3 shadow-sm">
-                <div className="flex justify-between items-baseline">
-                  <span className="text-[10px] font-bold tracking-widest text-[#706c60] uppercase">DISAPPEARING MESSAGES</span>
-                  <span className="text-xs font-bold text-clay">{disappearingHours} HOUR</span>
-                </div>
-                <input 
-                  type="range" 
-                  min="1" 
-                  max="24" 
-                  value={disappearingHours}
-                  onChange={(e) => setDisappearingHours(Number(e.target.value))}
-                  className="w-full accent-clay cursor-pointer h-1 bg-[#faede2] rounded-lg appearance-none"
-                />
-                <p className="text-[10px] text-[#9c9689] font-medium leading-normal">
-                  All messages sent after enabling will dissolve from client histories once the timer expires.
-                </p>
-              </div>
-
-              {/* Ghost Mode Card */}
-              <div className="bg-charcoal text-white p-4.5 rounded-3xl space-y-2.5 shadow-lg relative overflow-hidden">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-2">
-                    <Ghost className="w-4 h-4 text-purple-400" />
-                    <h4 className="text-xs font-bold tracking-wide">Ghost Mode</h4>
-                  </div>
-                  {/* Custom Toggle Switch */}
-                  <button 
-                    onClick={() => setGhostMode(!ghostMode)}
-                    className={`w-9 h-5 rounded-full p-0.5 transition-colors duration-200 ease-in-out cursor-pointer ${
-                      ghostMode ? 'bg-clay' : 'bg-neutral-700'
-                    }`}
-                  >
-                    <div className={`w-4 h-4 rounded-full bg-white transition-transform duration-200 ease-in-out ${
-                      ghostMode ? 'transform translate-x-4' : ''
-                    }`}></div>
-                  </button>
-                </div>
-                <p className="text-[10px] text-neutral-400 leading-normal font-medium">
-                  Chat in public rooms without revealing your identity. Generates a randomized alias, leaving no traces behind.
-                </p>
-              </div>
-            </div>
-          )}
-
-          {/* ================= VIEW: SCHEDULE (REMINDERS) ================= */}
-          {currentView === 'schedule' && (
-            <div className="flex flex-col h-full pt-4 px-4 space-y-4 overflow-y-auto pb-16">
-              
-              {/* Header */}
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <span className="text-[9px] font-bold tracking-widest text-clay uppercase">AI REMINDERS</span>
-                  <h3 className="text-2xl font-bold font-serif text-charcoal">Schedule it</h3>
-                </div>
-                <div className="w-8 h-8 rounded-full bg-amber-tint border border-[#f5e4bd] flex items-center justify-center text-clay">
-                  <Bell className="w-4 h-4 fill-current" />
-                </div>
-              </div>
-
-              {/* AI Auto-Detected Reminder prompt (Interactive mock) */}
-              <div className="bg-white border border-[#ebdcb9]/60 rounded-2xl p-4 space-y-3 shadow-sm">
-                <div className="flex items-center space-x-2">
-                  <div className="w-6 h-6 rounded-full bg-[#fae8d7] flex items-center justify-center text-xs">
-                    👩🏼
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex justify-between items-center">
-                      <span className="text-[10px] font-bold text-charcoal truncate">Sarah Miller</span>
-                      <span className="text-[8px] text-[#9c9689] font-bold">DETECTED TIME</span>
-                    </div>
-                  </div>
-                </div>
-                <p className="text-xs text-[#524e45] leading-normal font-medium">
-                  "Can you review the parchment mockups by <span className="bg-[#faede2] text-clay font-bold px-2 py-0.5 rounded-full border border-clay/10 mx-0.5">3pm today</span> ?"
-                </p>
-                
-                {/* Click to add task button */}
-                <button 
-                  onClick={() => {
-                    const newTask = {
-                      id: Date.now(),
-                      title: 'Review parchment mockups',
-                      from: 'Sarah Miller',
-                      time: 'Today · 3:00 PM',
-                      completed: false,
-                      isAiDetected: true
-                    };
-                    setReminders([newTask, ...reminders]);
-                  }}
-                  className="w-full bg-clay text-white text-[10px] font-bold py-2 rounded-xl hover:bg-clay-hover active:scale-95 transition cursor-pointer"
-                >
-                  ➕ ADD DETECTED TASK TO REMINDERS
-                </button>
-              </div>
-
-              {/* Reminder List */}
-              <div className="space-y-2">
-                <span className="text-[9px] font-bold tracking-widest text-[#706c60] uppercase">UPCOMING WORKSPACE REMINDERS</span>
-                
-                <div className="space-y-2">
-                  {reminders.map((item) => (
-                    <div 
-                      key={item.id}
-                      className={`bg-white border p-3 rounded-2xl flex items-center justify-between shadow-sm transition ${
-                        item.completed ? 'border-[#ebdcb9]/40 opacity-60' : 'border-[#ebdcb9]/70'
-                      }`}
-                    >
-                      <div className="flex-1 min-w-0 pr-3">
-                        <div className="flex items-center space-x-1.5">
-                          {item.isAiDetected && <Sparkles className="w-3 h-3 text-clay shrink-0" />}
-                          <h5 className={`text-xs font-bold text-charcoal truncate ${item.completed ? 'line-through text-neutral-400' : ''}`}>
-                            {item.title}
-                          </h5>
-                        </div>
-                        <div className="flex items-center space-x-1.5 text-[9px] text-[#9c9689] font-bold mt-0.5">
-                          <span>From: {item.from}</span>
-                          <span>•</span>
-                          <span className="text-clay">{item.time}</span>
-                        </div>
-                      </div>
-                      
-                      {/* Checkbox button */}
-                      <button 
-                        onClick={() => handleToggleReminder(item.id)}
-                        className={`w-5 h-5 rounded-full border flex items-center justify-center cursor-pointer shrink-0 transition ${
-                          item.completed ? 'bg-clay border-clay text-white' : 'border-[#e2decb] bg-neutral-50 hover:bg-[#faede2]/50'
-                        }`}
-                      >
-                        {item.completed && <Check className="w-3.5 h-3.5 stroke-[3px]" />}
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ================= FIXED BOTTOM TAB NAVIGATION ================= */}
-          <div className="absolute bottom-3 left-0 right-0 px-6 z-20 shrink-0">
-            <div className="bg-charcoal text-white rounded-full p-1.5 flex justify-between items-center shadow-lg">
-              <button 
-                onClick={() => {
-                  setCurrentView('chats');
-                  setActiveChat(null);
-                }}
-                className={`flex-1 py-1.5 rounded-full text-xs font-bold transition cursor-pointer ${
-                  (currentView === 'chats' || currentView === 'chat-thread') ? 'bg-[#262626] text-white' : 'text-neutral-400 hover:text-white'
-                }`}
-              >
-                Chats
-              </button>
-              <button 
-                onClick={() => setCurrentView('moods')}
-                className={`flex-1 py-1.5 rounded-full text-xs font-bold transition cursor-pointer ${
-                  currentView === 'moods' ? 'bg-[#262626] text-white' : 'text-neutral-400 hover:text-white'
-                }`}
-              >
-                Moods
-              </button>
-              <button 
-                onClick={() => setCurrentView('schedule')}
-                className={`flex-1 py-1.5 rounded-full text-xs font-bold transition cursor-pointer ${
-                  currentView === 'schedule' ? 'bg-[#262626] text-white' : 'text-neutral-400 hover:text-white'
-                }`}
-              >
-                Schedule
-              </button>
+    <div className="h-screen w-screen bg-slate-100 flex overflow-hidden paper-texture">
+      {/* 1. LEFT SIDEBAR PANEL (WhatsApp style list) */}
+      <div className="w-80 md:w-96 border-r border-slate-200/80 bg-parchment flex flex-col h-full flex-shrink-0">
+        {/* User Profile Header */}
+        <div className="p-4 border-b border-slate-200/80 bg-white flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <button 
+              onClick={() => setMoodModalOpen(true)}
+              className="w-10 h-10 rounded-full bg-clay-tint hover:bg-clay/15 border border-clay/10 flex items-center justify-center text-xl transition-all shadow-inner relative group"
+              title="Update your Vibe/Mood"
+            >
+              {user.moodEmoji || '👋'}
+              <span className="absolute -bottom-1 -right-1 bg-clay text-white rounded-full p-0.5 text-[8px]">
+                ⚡
+              </span>
+            </button>
+            <div className="leading-tight text-left">
+              <h3 className="font-bold text-charcoal text-sm flex items-center gap-1.5">
+                {user.isAnonymousMode ? user.anonymousAlias || 'Anonymous' : user.username}
+                {user.isAnonymousMode && <Ghost className="w-3.5 h-3.5 text-clay animate-pulse" />}
+              </h3>
+              <p className="text-xs text-charcoal/50 max-w-[140px] truncate">
+                {user.moodText || 'No vibe set'}
+              </p>
             </div>
           </div>
 
+          <div className="flex items-center gap-1.5">
+            {/* Toggle Anonymous */}
+            <button
+              onClick={toggleAnonymousMode}
+              className={`p-2 rounded-lg border transition-all ${user.isAnonymousMode ? 'bg-clay text-white border-clay shadow-sm' : 'bg-white text-charcoal/60 hover:text-charcoal border-slate-200'}`}
+              title={user.isAnonymousMode ? "Disable Ghost/Anon mode" : "Enable Ghost/Anon mode"}
+            >
+              <Ghost className="w-4 h-4" />
+            </button>
+            
+            {/* New Chat */}
+            <button
+              onClick={() => setNewChatModalOpen(true)}
+              className="p-2 rounded-lg bg-white border border-slate-200 text-charcoal/60 hover:text-charcoal hover:border-slate-300 transition-all"
+              title="Start New DM"
+            >
+              <MessageSquare className="w-4 h-4" />
+            </button>
+
+            {/* New Group */}
+            <button
+              onClick={() => setNewGroupModalOpen(true)}
+              className="p-2 rounded-lg bg-white border border-slate-200 text-charcoal/60 hover:text-charcoal hover:border-slate-300 transition-all"
+              title="Create Group"
+            >
+              <Users className="w-4 h-4" />
+            </button>
+
+            {/* Logout */}
+            <button
+              onClick={handleLogout}
+              className="p-2 rounded-lg bg-red-50/50 hover:bg-red-50 border border-red-100 text-red-600 transition-all"
+              title="Logout"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
+        {/* Search Chats */}
+        <div className="p-3 border-b border-slate-100 bg-slate-50/50">
+          <div className="relative">
+            <Search className="w-4 h-4 text-charcoal/40 absolute left-3 top-2.5" />
+            <input
+              type="text"
+              placeholder="Search or start new chat"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full pl-9 pr-4 py-1.5 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-clay/50 bg-white text-sm text-charcoal"
+            />
+          </div>
+        </div>
+
+        {/* Rooms List */}
+        <div className="flex-1 overflow-y-auto">
+          {filteredRooms.length === 0 ? (
+            <div className="text-center py-8 text-charcoal/40 text-sm font-sans">
+              No chats found. Click the message icon to start a DM!
+            </div>
+          ) : (
+            filteredRooms.map((room) => {
+              const details = getRoomDisplayDetails(room);
+              const isActive = activeRoom?.id === room.id;
+              const lastMsg = (room as any).lastMessage;
+
+              return (
+                <button
+                  key={room.id}
+                  onClick={() => setActiveRoom(room)}
+                  className={`w-full p-4 flex items-center gap-3 border-b border-slate-100 text-left transition-all relative ${isActive ? 'bg-clay-tint border-l-4 border-l-clay' : 'bg-parchment hover:bg-slate-50'}`}
+                >
+                  <div className="w-11 h-11 rounded-full bg-clay/10 border border-clay/5 flex items-center justify-center text-xl shadow-inner">
+                    {details.avatar.startsWith('http') ? (
+                      <img src={details.avatar} alt="Avatar" className="w-full h-full rounded-full object-cover" />
+                    ) : (
+                      details.avatar
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0 leading-tight">
+                    <div className="flex justify-between items-baseline mb-0.5">
+                      <h4 className="font-bold text-charcoal truncate text-sm">
+                        {details.name}
+                      </h4>
+                      {lastMsg && (
+                        <span className="text-[10px] text-charcoal/40">
+                          {new Date(lastMsg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-charcoal/50 truncate font-sans">
+                      {lastMsg 
+                        ? `${lastMsg.sender.username}: ${lastMsg.content}` 
+                        : details.statusText}
+                    </p>
+                  </div>
+                </button>
+              );
+            })
+          )}
+        </div>
       </div>
+
+      {/* 2. RIGHT CHAT WINDOW (WhatsApp style pane) */}
+      <div className="flex-1 bg-white flex flex-col h-full relative">
+        {activeRoom ? (
+          <>
+            {/* Header */}
+            <div className="p-4 border-b border-slate-200/80 bg-white flex items-center justify-between shadow-sm z-10">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-clay/10 flex items-center justify-center text-xl">
+                  {getRoomDisplayDetails(activeRoom).avatar.startsWith('http') ? (
+                    <img 
+                      src={getRoomDisplayDetails(activeRoom).avatar} 
+                      alt="Avatar" 
+                      className="w-full h-full rounded-full object-cover" 
+                    />
+                  ) : (
+                    getRoomDisplayDetails(activeRoom).avatar
+                  )}
+                </div>
+                <div className="text-left leading-tight">
+                  <h3 className="font-bold text-charcoal text-sm">
+                    {getRoomDisplayDetails(activeRoom).name}
+                  </h3>
+                  <p className="text-[11px] text-charcoal/45 font-sans">
+                    {typingUsers.length > 0 
+                      ? `${typingUsers.map((u) => u.username).join(', ')} typing...`
+                      : getRoomDisplayDetails(activeRoom).statusText}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={requestSummary}
+                  className="px-3 py-1.5 rounded-lg bg-clay/10 hover:bg-clay/20 text-clay font-bold text-xs flex items-center gap-1.5 transition-all"
+                  title="Generate Claude Summary"
+                >
+                  <Sparkles className="w-3.5 h-3.5" /> AI Pulse
+                </button>
+              </div>
+            </div>
+
+            {/* Messages Area */}
+            <div className="flex-1 overflow-y-auto p-6 bg-slate-50 space-y-4 relative">
+              {messages.length === 0 ? (
+                <div className="text-center py-12 text-charcoal/40 text-sm font-sans">
+                  No messages yet. Send a message to start the conversation!
+                </div>
+              ) : (
+                messages.map((msg) => {
+                  const isMe = msg.sender.id === user.id;
+                  
+                  return (
+                    <div 
+                      key={msg.id} 
+                      className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
+                    >
+                      <div 
+                        className={`max-w-[70%] px-4 py-2.5 rounded-2xl shadow-sm leading-snug text-sm relative ${isMe ? 'bg-clay text-white rounded-tr-none' : 'bg-white text-charcoal border border-slate-200/50 rounded-tl-none'}`}
+                      >
+                        {/* Sender info (for group rooms or other users DMs) */}
+                        {!isMe && (
+                          <div className={`text-[10px] font-bold mb-0.5 ${msg.isAnonymous ? 'text-purple-600' : 'text-clay-hover'}`}>
+                            {msg.sender.username} {msg.isAnonymous && '(Anonymous Mode)'}
+                          </div>
+                        )}
+                        <p className="whitespace-pre-wrap break-words">{msg.content}</p>
+                        <div className={`text-[9px] text-right mt-1.5 ${isMe ? 'text-white/60' : 'text-charcoal/40'}`}>
+                          {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+              
+              {/* Typing indicators */}
+              {typingUsers.map((tu) => (
+                <div key={tu.userId} className="flex justify-start items-center gap-1.5 text-xs text-charcoal/40 italic font-sans pl-2">
+                  <span className="w-1.5 h-1.5 bg-clay/55 rounded-full animate-bounce"></span>
+                  <span>{tu.username} is typing...</span>
+                </div>
+              ))}
+              <div ref={messageEndRef} />
+            </div>
+
+            {/* Smart Replies Suggestions */}
+            {smartReplies.length > 0 && (
+              <div className="px-6 py-2 border-t border-slate-100 bg-slate-50/70 flex flex-wrap gap-2 items-center">
+                <span className="text-[10px] text-charcoal/40 font-bold uppercase tracking-wider flex items-center gap-1">
+                  <Bot className="w-3.5 h-3.5 text-clay" /> Smart Replies:
+                </span>
+                {smartReplies.map((reply, i) => (
+                  <button
+                    key={i}
+                    onClick={() => handleSendMessage(reply)}
+                    className="px-3 py-1 bg-white hover:bg-clay-tint border border-slate-200 hover:border-clay/30 text-charcoal text-xs rounded-full shadow-sm hover:text-clay transition-all"
+                  >
+                    {reply}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Input Bar */}
+            <div className="p-4 border-t border-slate-200 bg-white flex flex-col gap-2 relative">
+              
+              {/* AI Tone check warning banner */}
+              {toneResult && toneResult.severity !== 'good' && (
+                <div className="absolute -top-12 left-4 right-4 p-2 bg-red-50 border border-red-200 rounded-lg flex items-center gap-2 text-xs text-red-700 shadow-md z-20">
+                  <ShieldAlert className="w-4 h-4 text-red-600 flex-shrink-0" />
+                  <span className="font-sans">
+                    <strong>{toneResult.tone}</strong>: {toneResult.explanation || 'Tone might feel demanding. Consider softening it.'}
+                  </span>
+                </div>
+              )}
+
+              <div className="flex items-center gap-3">
+                {/* Anonymous send checkbox */}
+                <button
+                  onClick={() => setSendAnonymously(!sendAnonymously)}
+                  className={`p-2 rounded-lg border transition-all ${sendAnonymously ? 'bg-purple-100 text-purple-700 border-purple-300' : 'bg-slate-50 text-charcoal/45 hover:text-charcoal hover:bg-slate-100 border-slate-200'}`}
+                  title="Toggle Send Anonymously"
+                >
+                  <Ghost className="w-4 h-4" />
+                </button>
+
+                {/* Main text input */}
+                <input
+                  type="text"
+                  placeholder="Type a message..."
+                  value={messageInput}
+                  onChange={handleInputChange}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleSendMessage(messageInput); }}
+                  className="flex-1 px-4 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-clay/50 bg-white text-charcoal"
+                />
+
+                <button
+                  onClick={() => handleSendMessage(messageInput)}
+                  disabled={!messageInput.trim()}
+                  className="p-2.5 rounded-lg bg-clay hover:bg-clay-hover text-white disabled:bg-slate-200 disabled:text-slate-400 transition-all shadow-sm"
+                >
+                  <Send className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Input helpers row */}
+              <div className="flex justify-between items-center px-1">
+                <div className="flex gap-2">
+                  {toneResult && (
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${toneResult.severity === 'good' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
+                      {toneResult.tone}
+                    </span>
+                  )}
+                  {sendAnonymously && (
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-50 text-purple-700 border border-purple-200">
+                      Sending Anonymously
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="flex-1 flex flex-col items-center justify-center p-8 bg-slate-50">
+            <div className="w-full max-w-md text-center space-y-6">
+              <div className="w-20 h-20 rounded-2xl bg-clay-tint border border-clay/10 flex items-center justify-center mx-auto shadow-md">
+                <Sparkles className="w-10 h-10 text-clay" />
+              </div>
+              <h2 className="font-serif text-3xl text-charcoal font-bold">
+                Welcome to Kith Chat
+              </h2>
+              <p className="text-charcoal/50 text-sm font-sans leading-relaxed">
+                Connect and chat in real-time. Use the sidebar to update your vibe, enable ghost mode, or start a new direct message conversation with your friends.
+              </p>
+              <div className="flex justify-center">
+                <button
+                  onClick={() => setNewChatModalOpen(true)}
+                  className="px-4 py-2 bg-clay hover:bg-clay-hover text-white rounded-lg font-bold text-sm transition shadow-sm flex items-center gap-2"
+                >
+                  <MessageSquare className="w-4 h-4" /> Start chatting now
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 3. MODALS & SLIDE-OUT PANELS */}
+
+      {/* A. Mood / Vibe Setup Modal */}
+      {moodModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="w-full max-w-sm bg-parchment rounded-xl shadow-xl border border-clay/10 p-6 relative">
+            <button 
+              onClick={() => setMoodModalOpen(false)}
+              className="absolute top-4 right-4 text-charcoal/40 hover:text-charcoal"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <h3 className="font-serif text-lg text-charcoal font-bold mb-4">Update Your Vibe</h3>
+            
+            <form onSubmit={handleUpdateMood} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-charcoal/60 mb-1">Select Emoji</label>
+                <div className="flex gap-2 justify-between">
+                  {['😊', '🎧', '☕', '🚀', '🔥', '📚', '🌱', '🍿'].map((emoji) => (
+                    <button
+                      key={emoji}
+                      type="button"
+                      onClick={() => setSelectedEmoji(emoji)}
+                      className={`w-10 h-10 rounded-lg flex items-center justify-center text-xl border ${selectedEmoji === emoji ? 'bg-clay text-white border-clay' : 'bg-white border-slate-200 hover:bg-slate-50'}`}
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-charcoal/60 mb-1">Custom Status Text</label>
+                <input
+                  type="text"
+                  placeholder="What are you up to?"
+                  value={customVibeText}
+                  onChange={(e) => setCustomVibeText(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-clay/50 bg-white text-charcoal text-sm"
+                />
+              </div>
+
+              <button
+                type="submit"
+                className="w-full py-2 bg-clay hover:bg-clay-hover text-white rounded-lg font-bold text-sm transition shadow-sm"
+              >
+                Save Vibe Status
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* B. New DM Modal */}
+      {newChatModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="w-full max-w-sm bg-parchment rounded-xl shadow-xl border border-clay/10 p-6 max-h-[80vh] flex flex-col relative">
+            <button 
+              onClick={() => setNewChatModalOpen(false)}
+              className="absolute top-4 right-4 text-charcoal/40 hover:text-charcoal"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <h3 className="font-serif text-lg text-charcoal font-bold mb-4">Start a DM</h3>
+
+            <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+              {contacts.length === 0 ? (
+                <div className="text-center py-8 text-charcoal/40 text-sm">
+                  No contacts found. Register another user to start a DM!
+                </div>
+              ) : (
+                contacts.map((contact) => (
+                  <button
+                    key={contact.id}
+                    onClick={() => startDM(contact)}
+                    className="w-full p-3 bg-white hover:bg-clay-tint border border-slate-200 hover:border-clay/20 rounded-lg text-left flex items-center gap-3 transition-all"
+                  >
+                    <div className="w-8 h-8 rounded-full bg-clay/10 flex items-center justify-center text-sm font-bold text-clay">
+                      {contact.moodEmoji || '👤'}
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-charcoal text-sm">
+                        {contact.isAnonymousMode ? contact.anonymousAlias || 'Anonymous' : contact.username}
+                      </h4>
+                      <p className="text-[10px] text-charcoal/40">
+                        {contact.email}
+                      </p>
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* C. Create Group Modal */}
+      {newGroupModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="w-full max-w-sm bg-parchment rounded-xl shadow-xl border border-clay/10 p-6 max-h-[80vh] flex flex-col relative">
+            <button 
+              onClick={() => setNewGroupModalOpen(false)}
+              className="absolute top-4 right-4 text-charcoal/40 hover:text-charcoal"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <h3 className="font-serif text-lg text-charcoal font-bold mb-3">Create Group</h3>
+
+            <form onSubmit={handleCreateGroup} className="space-y-4 flex flex-col flex-1 overflow-hidden">
+              <div>
+                <label className="block text-xs font-bold text-charcoal/60 mb-1">Group Name</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Design Team"
+                  value={groupName}
+                  onChange={(e) => setGroupName(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-clay/50 bg-white text-charcoal text-sm"
+                />
+              </div>
+
+              <div className="flex-1 flex flex-col overflow-hidden">
+                <label className="block text-xs font-bold text-charcoal/60 mb-1">Select Members</label>
+                <div className="flex-1 overflow-y-auto space-y-1 bg-white border border-slate-200 rounded-lg p-2 max-h-48">
+                  {contacts.length === 0 ? (
+                    <div className="text-center py-4 text-charcoal/40 text-xs">
+                      No contacts found.
+                    </div>
+                  ) : (
+                    contacts.map((contact) => {
+                      const isSelected = selectedMemberIds.includes(contact.id);
+                      return (
+                        <label
+                          key={contact.id}
+                          className="flex items-center justify-between p-2 hover:bg-slate-50 rounded cursor-pointer"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs">{contact.moodEmoji || '👤'}</span>
+                            <span className="text-sm text-charcoal font-semibold">{contact.username}</span>
+                          </div>
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => {
+                              setSelectedMemberIds((prev) =>
+                                isSelected 
+                                  ? prev.filter((id) => id !== contact.id)
+                                  : [...prev, contact.id]
+                              );
+                            }}
+                            className="accent-clay"
+                          />
+                        </label>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={!groupName.trim() || selectedMemberIds.length === 0}
+                className="w-full py-2 bg-clay hover:bg-clay-hover text-white rounded-lg font-bold text-sm transition shadow-sm disabled:bg-slate-200 disabled:text-slate-400"
+              >
+                Create Group Chat
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* D. AI Chat Summary Slide-out / Modal */}
+      {summaryOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-end z-50">
+          <div className="w-full max-w-md bg-parchment h-full shadow-2xl border-l border-slate-200 p-6 flex flex-col relative animate-slide-in">
+            <button 
+              onClick={() => setSummaryOpen(false)}
+              className="absolute top-6 right-6 text-charcoal/40 hover:text-charcoal"
+            >
+              <X className="w-6 h-6" />
+            </button>
+
+            <h2 className="font-serif text-2xl text-charcoal font-bold mb-2 flex items-center gap-2">
+              <Sparkles className="text-clay w-6 h-6" /> AI Pulse Summary
+            </h2>
+            <p className="text-xs text-charcoal/50 mb-6 font-sans">
+              Powered by Claude—generates a brief summary of key discussion points in this chat room.
+            </p>
+
+            <div className="flex-1 overflow-y-auto bg-white border border-slate-200/50 rounded-xl p-4 shadow-inner">
+              {summaryLoading ? (
+                <div className="flex flex-col items-center justify-center h-full space-y-3">
+                  <RefreshCw className="w-8 h-8 text-clay animate-spin" />
+                  <span className="text-xs text-charcoal/50 font-bold">Claude is analyzing messages...</span>
+                </div>
+              ) : aiSummary ? (
+                <div className="prose text-charcoal/80 text-sm leading-relaxed whitespace-pre-wrap font-sans">
+                  {aiSummary}
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center h-full text-center p-4">
+                  <Sparkles className="w-10 h-10 text-clay/30 mb-2" />
+                  <span className="text-sm text-charcoal/40 font-semibold">Failed to load summary. Try typing more messages first!</span>
+                </div>
+              )}
+            </div>
+
+            <button
+              onClick={requestSummary}
+              className="w-full mt-6 py-2.5 bg-clay hover:bg-clay-hover text-white rounded-lg font-bold text-sm transition shadow-sm flex items-center justify-center gap-2"
+            >
+              <RefreshCw className="w-4 h-4" /> Refresh Summary
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
