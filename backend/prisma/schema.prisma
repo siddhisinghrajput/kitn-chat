@@ -1,0 +1,181 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum RoomType {
+  group
+  dm
+}
+
+enum MemberRole {
+  admin
+  member
+}
+
+enum MessageType {
+  text
+  voice
+  poll_ref
+}
+
+model User {
+  id                Int           @id @default(autoincrement())
+  username          String        @unique
+  email             String        @unique
+  passwordHash      String        @map("password_hash")
+  avatarUrl         String?       @map("avatar_url")
+  moodEmoji         String?       @map("mood_emoji")
+  moodText          String?       @map("mood_text")
+  isAnonymousMode   Boolean       @default(false) @map("is_anonymous_mode")
+  anonymousAlias    String?       @map("anonymous_alias")
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  memberships       RoomMember[]
+  messages          Message[]
+  pinnedTasks       PinnedTask[]  @relation("PinnedBy")
+  completedTasks    PinnedTask[]  @relation("CompletedBy")
+  pollsCreated      Poll[]
+  pollVotes         PollVote[]
+  liveLocations     LiveLocation[]
+  dmLocations       LiveLocation[] @relation("DmPartner")
+
+  @@map("users")
+}
+
+model Room {
+  id            Int           @id @default(autoincrement())
+  name          String?
+  type          RoomType
+  createdBy     Int?          @map("created_by")
+  isPublic      Boolean       @default(false) @map("is_public")
+  createdAt     DateTime      @default(now()) @map("created_at")
+
+  members       RoomMember[]
+  messages      Message[]
+  pinnedTasks   PinnedTask[]
+  polls         Poll[]
+  liveLocations LiveLocation[]
+
+  @@map("rooms")
+}
+
+model RoomMember {
+  roomId   Int        @map("room_id")
+  userId   Int        @map("user_id")
+  role     MemberRole @default(member)
+  joinedAt DateTime   @default(now()) @map("joined_at")
+
+  room     Room       @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user     User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([roomId, userId])
+  @@map("room_members")
+}
+
+model Message {
+  id                     String      @id @default(uuid()) @db.Uuid
+  roomId                 Int         @map("room_id")
+  senderId               Int         @map("sender_id")
+  content                String      @db.Text
+  type                   MessageType @default(text)
+  voiceUrl               String?     @map("voice_url")
+  voiceDurationSeconds   Int?        @map("voice_duration_seconds")
+  isAnonymous            Boolean     @default(false) @map("is_anonymous")
+  expiresAt              DateTime?   @map("expires_at")
+  scheduledAt            DateTime?   @map("scheduled_at")
+  isSent                 Boolean     @default(true) @map("is_sent")
+  translatedCache        Json?       @map("translated_cache")
+  createdAt              DateTime    @default(now()) @map("created_at")
+
+  room                   Room        @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  sender                 User        @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  pinnedTasks            PinnedTask[]
+  polls                  Poll[]
+
+  @@map("messages")
+}
+
+model PinnedTask {
+  id          Int       @id @default(autoincrement())
+  messageId   String    @map("message_id") @db.Uuid
+  roomId      Int       @map("room_id")
+  pinnedBy    Int       @map("pinned_by")
+  isCompleted Boolean   @default(false) @map("is_completed")
+  completedBy Int?      @map("completed_by")
+  completedAt DateTime? @map("completed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  message     Message   @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  room        Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  pinner      User      @relation("PinnedBy", fields: [pinnedBy], references: [id], onDelete: Cascade)
+  completer   User?     @relation("CompletedBy", fields: [completedBy], references: [id], onDelete: Cascade)
+
+  @@map("pinned_tasks")
+}
+
+model Poll {
+  id        Int          @id @default(autoincrement())
+  roomId    Int          @map("room_id")
+  messageId String       @map("message_id") @db.Uuid
+  question  String
+  createdBy Int          @map("created_by")
+  expiresAt DateTime?    @map("expires_at")
+  createdAt DateTime     @default(now()) @map("created_at")
+
+  room      Room         @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  message   Message      @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  creator   User         @relation(fields: [createdBy], references: [id], onDelete: Cascade)
+  options   PollOption[]
+  votes     PollVote[]
+
+  @@map("polls")
+}
+
+model PollOption {
+  id         Int        @id @default(autoincrement())
+  pollId     Int        @map("poll_id")
+  optionText String     @map("option_text")
+  voteCount  Int        @default(0) @map("vote_count")
+
+  poll       Poll       @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  votes      PollVote[]
+
+  @@map("poll_options")
+}
+
+model PollVote {
+  pollId   Int      @map("poll_id")
+  userId   Int      @map("user_id")
+  optionId Int      @map("option_id")
+  votedAt  DateTime @default(now()) @map("voted_at")
+
+  poll     Poll     @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  option   PollOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+
+  @@id([pollId, userId])
+  @@map("poll_votes")
+}
+
+model LiveLocation {
+  id           Int       @id @default(autoincrement())
+  userId       Int       @map("user_id")
+  roomId       Int?      @map("room_id")
+  dmPartnerId  Int?      @map("dm_partner_id")
+  latitude     Float
+  longitude    Float
+  expiresAt    DateTime  @map("expires_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  room         Room?     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  dmPartner    User?     @relation("DmPartner", fields: [dmPartnerId], references: [id], onDelete: Cascade)
+
+  @@map("live_locations")
+}

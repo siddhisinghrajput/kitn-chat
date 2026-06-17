@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: kith-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password123
+      POSTGRES_DB: kith_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - kith-network
+
+  redis:
+    image: redis:alpine
+    container_name: kith-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - kith-network
+
+  backend:
+    build: ./backend
+    container_name: kith-backend
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password123@postgres:5432/kith_db?schema=public
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=production_jwt_access_secret_key_123456
+      - JWT_REFRESH_SECRET=production_jwt_refresh_secret_key_123456
+      - ANTHROPIC_API_KEY=your_anthropic_api_key_here
+      - AWS_ACCESS_KEY_ID=your_aws_key_id
+      - AWS_SECRET_ACCESS_KEY=your_aws_secret_key
+      - AWS_S3_BUCKET=your_s3_bucket
+      - AWS_REGION=us-east-1
+      - PORT=3000
+      - NODE_ENV=production
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - kith-network
+
+  frontend:
+    build: ./frontend
+    container_name: kith-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - kith-network
+
+volumes:
+  pgdata:
+
+networks:
+  kith-network:
+    driver: bridge
