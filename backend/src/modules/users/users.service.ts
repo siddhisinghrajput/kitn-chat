@@ -118,4 +118,25 @@ export class UsersService {
 
     return user;
   }
+
+  /**
+   * List all users (except the current user)
+   */
+  static async listAllUsers(excludeUserId: number) {
+    return prisma.user.findMany({
+      where: {
+        id: { not: excludeUserId }
+      },
+      select: {
+        id: true,
+        username: true,
+        email: true,
+        avatarUrl: true,
+        moodEmoji: true,
+        moodText: true,
+        isAnonymousMode: true,
+        anonymousAlias: true,
+      }
+    });
+  }
 }

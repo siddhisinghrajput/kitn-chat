@@ -65,4 +65,12 @@ router.post(
   })
 );
 
+router.get(
+  '/',
+  asyncHandler(async (req, res) => {
+    const users = await UsersService.listAllUsers(req.user!.id);
+    res.status(200).json(users);
+  })
+);
+
 export default router;
