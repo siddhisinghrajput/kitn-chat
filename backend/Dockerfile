@@ -1,5 +1,5 @@
-# Use official lightweight Node.js image
-FROM node:20-alpine
+# Use official Node.js image (non-alpine for better compatibility with Prisma engine)
+FROM node:20
 
 # Set working directory
 WORKDIR /app
@@ -22,5 +22,5 @@ RUN npm run build
 # Expose internal port
 EXPOSE 3000
 
-# Start server
-CMD ["npm", "start"]
+# Push database schema and start server
+CMD npx prisma db push && npm start
